@@ -24,3 +24,7 @@ logs/
 # db dumps
 *.sql
 *.dump
+
+# secrets
+core/settings.py
+.env
