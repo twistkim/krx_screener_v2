@@ -1,0 +1,19 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+jinja2==3.1.5
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+
+sqlalchemy==2.0.36
+asyncmy==0.2.9
+pandas==2.2.3
+pykrx==1.0.48
+
+# SQLAlchemy async에 필요
+greenlet==3.1.1
+
+# MySQL auth(caching_sha2_password 등)에서 필요할 수 있음
+cryptography==44.0.0
+
+# pykrx가 pkg_resources 쓰는 경우가 있어 venv에 꼭 있어야 함
+setuptools<81

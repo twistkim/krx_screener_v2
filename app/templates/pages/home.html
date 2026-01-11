@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}홈 | {{ request.app.title }}{% endblock %}
+
+{% block content %}
+<section class="rounded-2xl border border-white/10 bg-white/5 p-5">
+  <div class="flex flex-col gap-1">
+    <h1 class="text-xl font-semibold tracking-tight">추천 종목 + 차트</h1>
+    <p class="text-sm text-slate-400">버튼 클릭 → API 호출(JSON) → 프론트 렌더링 구조로 갑니다.</p>
+  </div>
+
+  <div class="mt-4 flex flex-wrap items-end gap-3">
+    <div class="flex flex-col gap-1">
+      <label class="text-xs text-slate-400">마켓</label>
+      <select id="market" class="h-10 rounded-xl border border-white/10 bg-slate-950 px-3 text-sm">
+        <option value="ALL">ALL</option>
+        <option value="KOSPI">KOSPI</option>
+        <option value="KOSDAQ">KOSDAQ</option>
+        <option value="KONEX">KONEX</option>
+      </select>
+    </div>
+
+    <div class="flex flex-col gap-1">
+      <label class="text-xs text-slate-400">개수</label>
+      <input id="limit" type="number" min="5" max="200" value="50"
+        class="h-10 w-28 rounded-xl border border-white/10 bg-slate-950 px-3 text-sm" />
+    </div>
+
+    <button id="btnFetch"
+      class="h-10 rounded-xl bg-white/10 px-4 text-sm font-medium hover:bg-white/15 active:bg-white/20">
+      데이터 가져오기
+    </button>
+
+    <button id="btnReco"
+      class="h-10 rounded-xl bg-blue-600 px-4 text-sm font-medium text-white hover:bg-blue-500 active:bg-blue-700">
+      추천하기
+    </button>
+
+    <p id="meta" class="ml-auto text-xs text-slate-400">상태: <span id="health">확인 중…</span></p>
+  </div>
+
+  <div class="mt-4 grid gap-4 lg:grid-cols-2">
+    <div class="overflow-hidden rounded-2xl border border-white/10">
+      <div class="border-b border-white/10 px-4 py-3 text-sm font-medium">추천 리스트</div>
+      <div id="tableWrap" class="max-h-[640px] overflow-auto p-3 text-sm text-slate-400">
+        아직 데이터가 없습니다. 상단 버튼을 눌러 진행하세요.
+      </div>
+    </div>
+
+    <div class="overflow-hidden rounded-2xl border border-white/10">
+      <div class="border-b border-white/10 px-4 py-3">
+        <div class="text-sm font-medium">차트</div>
+        <div id="chartTitle" class="mt-1 text-xs text-slate-400">종목을 선택하세요.</div>
+      </div>
+      <div class="p-3 text-sm text-slate-400">
+        (다음 단계에서 Plotly + /api/chart/{symbol} 붙입니다)
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script src="{{ url_for('static', path='js/pages/home.js') }}"></script>
+{% endblock %}
