@@ -1,0 +1,26 @@
+# env / secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# logs / cache
+logs/
+*.log
+.cache/
+
+# OS
+.DS_Store
+
+# db dumps
+*.sql
+*.dump
