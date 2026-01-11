@@ -1,6 +1,10 @@
 # app/routers/api/reco.py
 from __future__ import annotations
 
+import json
+from decimal import Decimal
+from typing import Any, Dict
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
@@ -8,6 +12,57 @@ from sqlalchemy import text
 from app.core.db import get_db
 
 router = APIRouter(prefix="/api/reco", tags=["reco"])
+
+
+def _parse_meta(meta_json: Any) -> Dict[str, Any] | None:
+    """DB의 meta_json을 프론트에서 쓰기 쉬운 dict로 변환."""
+    if meta_json is None:
+        return None
+
+    # MySQL JSON 컬럼은 드라이버/설정에 따라 dict/str/bytes로 올 수 있음
+    if isinstance(meta_json, dict):
+        return meta_json
+
+    if isinstance(meta_json, (bytes, bytearray)):
+        try:
+            meta_json = meta_json.decode("utf-8")
+        except Exception:
+            meta_json = str(meta_json)
+
+    if isinstance(meta_json, str):
+        s = meta_json.strip()
+        if not s:
+            return None
+        try:
+            return json.loads(s)
+        except Exception:
+            # 파싱 실패 시 raw를 그대로 담아 반환
+            return {"_raw": meta_json}
+
+    # 그 외 타입
+    return {"_raw": str(meta_json)}
+
+
+def _norm_row(r: Dict[str, Any]) -> Dict[str, Any]:
+    """API 응답을 안정적으로 직렬화 가능한 형태로 정규화."""
+    score = r.get("score")
+    if isinstance(score, Decimal):
+        score = float(score)
+
+    meta_json = r.get("meta_json")
+    meta = _parse_meta(meta_json)
+
+    return {
+        "run_id": r.get("run_id"),
+        "symbol": r.get("symbol"),
+        "name": r.get("name"),
+        "market": r.get("market"),
+        "score": score,
+        # ✅ 프론트에서 쓰기 쉬운 키
+        "meta": meta,
+        # (호환/디버그용) 원본도 같이 내려줌
+        "meta_json": meta_json,
+    }
 
 
 @router.get("")
@@ -27,7 +82,9 @@ async def get_reco(
         """
     )
     rows = (await db.execute(q, {"rid": run_id, "lim": limit})).mappings().all()
-    return {"ok": True, "run_id": run_id, "items": [dict(r) for r in rows]}
+
+    items = [_norm_row(dict(r)) for r in rows]
+    return {"ok": True, "run_id": run_id, "items": items}
 
 
 @router.get("/latest")
@@ -74,10 +131,12 @@ async def get_reco_latest(
         """
     )
     rows = (await db.execute(q, {"rid": run["id"], "lim": limit})).mappings().all()
+
+    items = [_norm_row(dict(r)) for r in rows]
     return {
         "ok": True,
         "run_id": run["id"],
         "asof_date": run["asof_date"],
         "market": run["market"],
-        "items": [dict(r) for r in rows],
+        "items": items,
     }

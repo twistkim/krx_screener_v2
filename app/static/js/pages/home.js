@@ -53,6 +53,7 @@ function lockUI(locked) {
   }
 }
 
+
 function renderTable(items) {
   const wrap = $("tableWrap");
   if (!wrap) return;
@@ -66,21 +67,47 @@ function renderTable(items) {
     .map((it, idx) => {
       const rank = it.rank ?? (idx + 1);
       const ticker = it.ticker || it.symbol || it.code || "";
+      const name = it.name || it.company || it.company_name || "";
+      const market = it.market || "";
+
       const scoreVal = typeof it.score === "number" ? it.score : Number(it.score || 0);
       const score = Number.isFinite(scoreVal) ? scoreVal.toFixed(2) : "-";
       const note = it.note || it.reason || "";
 
-      // 차트 API가 있으면 클릭으로 확인 가능
+      const tvSymbol = ticker ? `KRX:${ticker}` : "";
+
+      const safeName = (name || "")
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+
+      const safeMarket = (market || "")
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+
       const tickerCell = ticker
-        ? `<a class="underline decoration-white/20 hover:decoration-white/60" href="/api/chart/${encodeURIComponent(ticker)}" target="_blank" rel="noreferrer">${ticker}</a>`
+        ? `<button type="button" class="underline decoration-white/20 hover:decoration-white/60 cursor-pointer" data-action="chart" data-ticker="${ticker}" data-name="${safeName}" data-market="${safeMarket}" title="차트 보기">${ticker}</button>`
+        : "";
+
+      const nameCell = name
+        ? `<span class="text-slate-200">${name}</span>${market ? `<span class="text-xs text-slate-500"> · ${market}</span>` : ""}`
+        : `<span class="text-slate-500">-</span>`;
+
+      const tvLink = tvSymbol
+        ? `<a class="text-xs text-slate-400 underline decoration-white/10 hover:decoration-white/40" href="https://www.tradingview.com/chart/?symbol=${encodeURIComponent(tvSymbol)}" target="_blank" rel="noreferrer">차트</a>`
         : "";
 
       return `
         <tr class="border-b border-white/5 hover:bg-white/5">
           <td class="px-3 py-2 text-slate-300">${rank}</td>
           <td class="px-3 py-2 font-medium text-white">${tickerCell}</td>
+          <td class="px-3 py-2">${nameCell}</td>
           <td class="px-3 py-2 text-slate-300">${score}</td>
           <td class="px-3 py-2 text-xs text-slate-400">${note}</td>
+          <td class="px-3 py-2 text-right">${tvLink}</td>
         </tr>
       `;
     })
@@ -92,8 +119,10 @@ function renderTable(items) {
         <tr class="text-left text-xs text-slate-400">
           <th class="px-3 py-2 w-14">#</th>
           <th class="px-3 py-2 w-28">Ticker</th>
+          <th class="px-3 py-2">종목명</th>
           <th class="px-3 py-2 w-24">Score</th>
           <th class="px-3 py-2">Note</th>
+          <th class="px-3 py-2 w-16 text-right">Chart</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
@@ -187,8 +216,15 @@ function bindUI() {
         const data = await api(`/api/reco/latest?market=${encodeURIComponent(market)}&limit=${limit}`);
 
         // 서버 응답 키가 환경마다 다를 수 있어 넉넉하게 대응
-        const items = data.items ?? data.recos ?? data.results ?? data.top ?? [];
+        let items = data.items ?? data.recos ?? data.results ?? data.top ?? [];
+
+        // 최신 reco가 비어있거나 아직 저장 전이면, 방금 screen 결과(top)를 fallback으로 사용
+        if ((!items || items.length === 0) && Array.isArray(screenRes?.top) && screenRes.top.length > 0) {
+          items = screenRes.top;
+        }
+
         renderTable(items);
+
 
         const run =
           data.run ??
@@ -208,6 +244,26 @@ function bindUI() {
       } finally {
         lockUI(false);
       }
+    });
+  }
+
+  // Event delegation for chart button in table (always open TradingView)
+  const tableWrap = $("tableWrap");
+  if (tableWrap) {
+    tableWrap.addEventListener("click", (ev) => {
+      const btn = ev.target?.closest?.('[data-action="chart"]');
+      if (!btn) return;
+      ev.preventDefault();
+
+      const ticker = btn.getAttribute("data-ticker") || "";
+      const tv = ticker ? `KRX:${ticker}` : "";
+      if (!tv) return;
+
+      window.open(
+        `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(tv)}`,
+        "_blank",
+        "noopener,noreferrer"
+      );
     });
   }
 }
