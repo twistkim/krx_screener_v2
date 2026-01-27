@@ -33,10 +33,10 @@ MA60_RECLAIM_MAX = 1.08               # 종가가 60MA의 +8%를 넘으면 이�
 MA120_RECLAIM_MAX = 1.08              # 종가가 120MA의 +8%를 넘으면 이미 올라탄 걸로 봄 — 완화
 
 # Overheat ("연간 급등" 제외) — 데이터가 있을 때만 적용
-MAX_RET_LOOKBACK = 1.5                # lookback 기간 수익률 +150% 초과면 제외
-MAX_MA200_GAP = 0.6                   # 200MA 대비 +60% 초과면 제외
-NEAR_HIGH_PCT = 0.98                  # 52주(또는 가용 구간) 고점 2% 이내면 near-high
-NEAR_HIGH_RET_CAP = 0.8               # near-high 이면서 수익률 +80% 초과면 제외
+MAX_RET_LOOKBACK = 1.0                # 1년(또는 대체 lookback) 수익률 +100% 초과면 제외
+MAX_MA200_GAP = 0.5                   # 200MA 대비 +50% 초과면 제외
+NEAR_HIGH_PCT = 0.985                 # 52주 고점 1.5% 이내면 near-high
+NEAR_HIGH_RET_CAP = 0.6               # near-high 이면서 수익률 +60% 초과면 제외
 
 
 @dataclass
@@ -221,6 +221,24 @@ def _score_symbol(bars_desc: list[Bar]) -> tuple[float, dict[str, Any]] | None:
     if (ret_20 is not None) and (slope20 is not None):
         downtrend_20 = (ret_20 < 0) and (slope20 < 0)
 
+    # --- NEW: 주봉(Proxy) 우하향 보조 점수 ---
+    # 일봉 데이터를 5거래일 단위로 샘플링해서 주봉 흐름을 대략적으로 추정
+    weekly_closes_latest_first = [float(b.close) for b in bars_desc[:60:5]]  # 최신->과거, 약 12주
+    weekly_closes = list(reversed(weekly_closes_latest_first))               # 과거->최신
+
+    ret_w = None
+    if len(weekly_closes) >= 2 and weekly_closes[0] > 0:
+        ret_w = (weekly_closes[-1] / weekly_closes[0]) - 1.0
+
+    slope_w = _lin_slope(weekly_closes)  # 원 단위/주(샘플 기준)
+    slope_w_pct_per_week = None
+    if slope_w is not None and weekly_closes and weekly_closes[-1] > 0:
+        slope_w_pct_per_week = (slope_w / weekly_closes[-1]) * 100.0
+
+    downtrend_w = False
+    if (ret_w is not None) and (slope_w is not None):
+        downtrend_w = (ret_w < 0) and (slope_w < 0)
+
     # --- context features: 하락(일봉) / 아래 횡보 / 수렴 / (선택) 돌파 ---
     n_available = len(bars_desc)
 
@@ -344,6 +362,12 @@ def _score_symbol(bars_desc: list[Bar]) -> tuple[float, dict[str, Any]] | None:
     if slope20_pct_per_day is not None and slope20_pct_per_day < 0:
         score += min((-slope20_pct_per_day) * 6.0, 18.0)
 
+    # (A-2) 주봉(Proxy) 우하향 보조 가점 (일봉보다 작게)
+    if downtrend_w:
+        score += 8.0
+    if slope_w_pct_per_week is not None and slope_w_pct_per_week < 0:
+        score += min((-slope_w_pct_per_week) * 2.5, 10.0)
+
     # (B) 60/120 기반 하락 전환 컨텍스트(보조)
     if slope_down:
         score += 10.0
@@ -376,6 +400,9 @@ def _score_symbol(bars_desc: list[Bar]) -> tuple[float, dict[str, Any]] | None:
         "drop_from_high_20": float(drop_from_high_20) if drop_from_high_20 is not None else None,
         "slope20": float(slope20) if slope20 is not None else None,
         "slope20_pct_per_day": float(slope20_pct_per_day) if slope20_pct_per_day is not None else None,
+        "ret_w": float(ret_w) if ret_w is not None else None,
+        "slope_w": float(slope_w) if slope_w is not None else None,
+        "slope_w_pct_per_week": float(slope_w_pct_per_week) if slope_w_pct_per_week is not None else None,
         "filters": {
             "liquid_ok": liquid_ok,
             "sideways_ok": sideways_ok,
@@ -390,6 +417,7 @@ def _score_symbol(bars_desc: list[Bar]) -> tuple[float, dict[str, Any]] | None:
             "reclaimed_above_ma60": bool(reclaimed_above_ma60) if reclaimed_above_ma60 is not None else None,
             "reclaimed_above_ma120": bool(reclaimed_above_ma120) if reclaimed_above_ma120 is not None else None,
             "downtrend_20": bool(downtrend_20),
+            "downtrend_w": bool(downtrend_w),
         },
     }
     return score, meta
