@@ -11,26 +11,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # --- screening thresholds (tune here) ---
 LIQUID_MIN_VALUE_20 = 500_000_000      # 최근 20일 평균 거래대금(원)
-RANGE30_MAX = 0.18                    # 최근 30일 고저폭/종가 (횡보 판정)
-VOL_RATIO_MIN = 1.2                   # 최근 거래량/20일 평균 거래량
-BREAKOUT_TOL = 0.995                  # 직전 20일 종가 최고 대비 (0.5% 아래까지 허용)
+RANGE30_MAX = 0.22                    # 최근 30일 고저폭/종가 (횡보 판정) — 완화
+VOL_RATIO_MIN = 1.1                   # 최근 거래량/20일 평균 거래량 — 완화
+BREAKOUT_TOL = 0.98                   # 직전 20일 종가 최고 대비 (2% 아래까지 허용) — 완화
 
 # --- NEW: "고점→하락→(60/120 아래) 횡보→바닥 수렴" 컨텍스트 ---
 # 60/120MA 컨텍스트가 필요한 최소 데이터
 MIN_BARS_FOR_TREND = 140              # 120MA + slope 계산 여유
 
 # 최근 30일 종가 중 60/120 아래에 머무른 비율 (횡보 구간이 "아래에서" 형성되었는지)
-BELOW_LONG_MA_PCT = 0.7               # 70% 이상이면 "장기이평 아래 횡보"로 인정
+BELOW_LONG_MA_PCT = 0.55              # 55% 이상이면 "장기이평 아래 횡보"로 인정 — 완화
 
 # 바닥 수렴(압축): 최근 10일 변동폭이 최근 30일 변동폭 대비 충분히 줄었는지
-COMPRESSION_RATIO = 0.65              # range_10 <= range_30 * 0.65
+COMPRESSION_RATIO = 0.85              # range_10 <= range_30 * 0.85 — 완화
 
 # "우상향→우하향(꺾임)" 컨텍스트: 60MA 기울기가 꺾여 내려오는지(최근 vs 과거)
 SLOPE_SHIFT = 10                      # 10거래일 shift로 60MA 기울기 판단
 
 # 아직 크게 오른 종목 제외(장기이평 재탈환/급등) - "바닥권"만 남기기 위한 추가 컷
-MA60_RECLAIM_MAX = 1.02               # 종가가 60MA의 +2%를 넘으면 이미 올라탄 걸로 보고 제외(보수적)
-MA120_RECLAIM_MAX = 1.02              # 종가가 120MA의 +2%를 넘으면 제외
+MA60_RECLAIM_MAX = 1.08               # 종가가 60MA의 +8%를 넘으면 이미 올라탄 걸로 봄 — 완화
+MA120_RECLAIM_MAX = 1.08              # 종가가 120MA의 +8%를 넘으면 이미 올라탄 걸로 봄 — 완화
 
 # Overheat ("연간 급등" 제외) — 데이터가 있을 때만 적용
 MAX_RET_LOOKBACK = 1.5                # lookback 기간 수익률 +150% 초과면 제외
@@ -183,33 +183,43 @@ def _score_symbol(bars_desc: list[Bar]) -> tuple[float, dict[str, Any]] | None:
     vol_ratio = (float(last.volume) / avg_vol_20) if avg_vol_20 > 0 else 0.0
     volume_spike_ok = vol_ratio >= VOL_RATIO_MIN
 
-    # --- NEW: 바닥권/하락 컨텍스트 (60/120 아래 횡보 + 수렴 + "꺾임") ---
+    # --- context features: 하락(일봉) / 아래 횡보 / 수렴 / (선택) 돌파 ---
     n_available = len(bars_desc)
-    downtrend_context_ok = True
-    below_long_ma_ok = True
-    compression_ok = True
-    not_reclaimed_long_ma_ok = True
 
+    # defaults
     ma60 = None
     ma120 = None
     ma60_prev = None
+    slope_down = False
+    ma_stack_bearish = False
+    downtrend_context_ok = False
+
+    below_ratio = None
+    below_long_ma_ok = False
+
+    range_10 = None
+    compression_ok = False
+
+    reclaimed_above_ma60 = None
+    reclaimed_above_ma120 = None
 
     if n_available >= MIN_BARS_FOR_TREND:
         closes_all = [float(b.close) for b in bars_desc]  # 최신->과거
 
         ma60 = _ma(closes_all, 60, 0)
         ma120 = _ma(closes_all, 120, 0)
-
-        # 60MA 기울기(최근 vs 10일 전)
         ma60_prev = _ma(closes_all, 60, SLOPE_SHIFT)
 
-        # 1) "우상향→우하향" 컨텍스트: 60MA가 꺾여 내려오는지 + 60<120(약세 구간) 선호
-        if ma60 is not None and ma60_prev is not None and ma120 is not None:
+        # 1) "우상향→우하향(꺾임)"을 가장 중요 신호로 사용
+        if ma60 is not None and ma60_prev is not None:
             slope_down = ma60 < ma60_prev
+        if ma60 is not None and ma120 is not None:
             ma_stack_bearish = ma60 < ma120
-            downtrend_context_ok = slope_down and ma_stack_bearish
 
-        # 2) "60/120 아래 횡보": 최근 30일 종가 중 장기이평 아래 비율
+        # downtrend_context_ok는 *점수 가점용* (하드 필터로는 쓰지 않음)
+        downtrend_context_ok = slope_down and ma_stack_bearish
+
+        # 2) "60/120 아래 횡보" 비율 (가점/참고)
         if ma60 is not None and ma120 is not None:
             recent30_closes = [float(b.close) for b in bars_desc[:30]]
             below_cnt = 0
@@ -218,23 +228,19 @@ def _score_symbol(bars_desc: list[Bar]) -> tuple[float, dict[str, Any]] | None:
                     below_cnt += 1
             below_ratio = (below_cnt / len(recent30_closes)) if recent30_closes else 0.0
             below_long_ma_ok = below_ratio >= BELOW_LONG_MA_PCT
-        else:
-            below_ratio = None
 
-        # 3) "바닥권 수렴": 10일 변동폭이 30일 변동폭 대비 압축되는지
+        # 3) "바닥권 수렴" (완화: 10일 range가 30일 대비 충분히 줄면 가점)
         highs10 = [float(b.high) for b in bars_desc[:10]]
         lows10 = [float(b.low) for b in bars_desc[:10]]
-        range_10 = ((_max(highs10) - _min(lows10)) / last_close) if highs10 and lows10 else None
-        compression_ok = (range_10 is not None) and (range_10 <= (range_30 * COMPRESSION_RATIO))
+        if highs10 and lows10:
+            range_10 = (_max(highs10) - _min(lows10)) / last_close
+            compression_ok = range_10 <= (range_30 * COMPRESSION_RATIO)
 
-        # 4) "상승한 종목 제외": 이미 60/120 위로 확 올라탄 건 제외 (바닥권만)
-        if ma60 is not None and ma120 is not None:
-            not_reclaimed_long_ma_ok = (last_close <= ma60 * MA60_RECLAIM_MAX) and (last_close <= ma120 * MA120_RECLAIM_MAX)
-        else:
-            not_reclaimed_long_ma_ok = True
-    else:
-        below_ratio = None
-        range_10 = None
+        # 4) 장기이평 "재탈환" 여부 (이제는 탈락이 아니라 감점/정보)
+        if ma60 is not None:
+            reclaimed_above_ma60 = last_close > ma60 * MA60_RECLAIM_MAX
+        if ma120 is not None:
+            reclaimed_above_ma120 = last_close > ma120 * MA120_RECLAIM_MAX
 
     # --- breakout: "횡보+거래 터짐 이후 위로 방향" (기존보다 약간 현실적으로) ---
     # 기존: prev20_max_close 돌파 + last_close >= ma20
@@ -274,23 +280,47 @@ def _score_symbol(bars_desc: list[Bar]) -> tuple[float, dict[str, Any]] | None:
     if near_high and (ret_lookback is not None) and (ret_lookback > NEAR_HIGH_RET_CAP):
         overheated_ok = False
 
-    # 최종 필터: 기존 4개 + overheat + NEW 컨텍스트
-    if not (
-        liquid_ok
-        and sideways_ok
-        and volume_spike_ok
-        and breakout_ok
-        and overheated_ok
-        and downtrend_context_ok
-        and below_long_ma_ok
-        and compression_ok
-        and not_reclaimed_long_ma_ok
-    ):
+    # 최종 필터(완화): 유동성/횡보/거래량스파이크/과열제외만 하드 필터로 유지
+    if not (liquid_ok and sideways_ok and volume_spike_ok and overheated_ok):
         return None
 
-    # 점수(휴리스틱): MA 대비 상승률 + 거래량비 - 변동성 패널티
+    # 점수(휴리스틱, 우선순위):
+    # 1) 일봉 하락 전환(60MA 꺾임 + 60<120) 가점을 가장 크게
+    # 2) 거래량비(수급) / 박스권(변동성 패널티) / 아래횡보/수렴/돌파는 보조
     ma_gap_pct = (last_close / ma20 - 1.0) * 100.0
-    score = ma_gap_pct + (vol_ratio * 5.0) - (range_30 * 50.0)
+
+    score = 0.0
+
+    # (A) 하락 컨텍스트 가점 (가장 큼)
+    if slope_down:
+        score += 18.0
+    if ma_stack_bearish:
+        score += 12.0
+    if downtrend_context_ok:
+        score += 10.0  # 둘 다 만족 추가 보너스
+
+    # (B) 수급(거래량 스파이크) 가점
+    score += (vol_ratio * 6.0)
+
+    # (C) 박스권/난폭 패널티
+    score -= (range_30 * 40.0)
+
+    # (D) 단기 이평 대비 갭(너무 중요 X, 보조)
+    score += (ma_gap_pct * 0.6)
+
+    # (E) 장기이평 아래 횡보/수렴/돌파는 보조 가점
+    if below_ratio is not None:
+        score += (below_ratio * 8.0)
+    if compression_ok:
+        score += 6.0
+    if breakout_ok:
+        score += 8.0
+
+    # (F) 이미 너무 올라탄(장기이평 재탈환) 경우 감점
+    if reclaimed_above_ma60:
+        score -= 12.0
+    if reclaimed_above_ma120:
+        score -= 10.0
 
     meta = {
         "last_close": int(last_close),
@@ -316,9 +346,12 @@ def _score_symbol(bars_desc: list[Bar]) -> tuple[float, dict[str, Any]] | None:
             "breakout_ok": breakout_ok,
             "overheated_ok": overheated_ok,
             "downtrend_context_ok": downtrend_context_ok,
+            "slope_down": slope_down,
+            "ma_stack_bearish": ma_stack_bearish,
             "below_long_ma_ok": below_long_ma_ok,
             "compression_ok": compression_ok,
-            "not_reclaimed_long_ma_ok": not_reclaimed_long_ma_ok,
+            "reclaimed_above_ma60": bool(reclaimed_above_ma60) if reclaimed_above_ma60 is not None else None,
+            "reclaimed_above_ma120": bool(reclaimed_above_ma120) if reclaimed_above_ma120 is not None else None,
         },
     }
     return score, meta
