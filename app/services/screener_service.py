@@ -71,6 +71,21 @@ def _ma(series: list[float], window: int, start: int = 0) -> float | None:
     return _avg(chunk) if chunk else None
 
 
+def _lin_slope(y: list[float]) -> float | None:
+    """Return slope of y over x=0..n-1 using least squares. y is chronological (oldest->newest)."""
+    n = len(y)
+    if n < 2:
+        return None
+    xs = list(range(n))
+    x_mean = (n - 1) / 2.0
+    y_mean = _avg(y)
+    denom = sum((x - x_mean) ** 2 for x in xs)
+    if denom == 0:
+        return None
+    numer = sum((x - x_mean) * (yy - y_mean) for x, yy in zip(xs, y))
+    return numer / denom
+
+
 async def _get_latest_trade_date(db: AsyncSession, market: str) -> str | None:
     if market == "ALL":
         q = text("SELECT MAX(trade_date) AS d FROM daily_bars")
@@ -183,6 +198,29 @@ def _score_symbol(bars_desc: list[Bar]) -> tuple[float, dict[str, Any]] | None:
     vol_ratio = (float(last.volume) / avg_vol_20) if avg_vol_20 > 0 else 0.0
     volume_spike_ok = vol_ratio >= VOL_RATIO_MIN
 
+    # --- NEW: "좌상단 → 우하향"(최근 하락) 시각 패턴을 최우선 신호로 점수화 ---
+    # 최근 20일이 (고점 대비 내려오고 + 추세 기울기/수익률이 음수)면 강한 가점
+    recent20_closes_latest_first = [float(b.close) for b in bars60[:20]]  # 최신->과거
+    recent20_closes = list(reversed(recent20_closes_latest_first))        # 과거->최신
+
+    ret_20 = None
+    if recent20_closes and recent20_closes[0] > 0:
+        ret_20 = (last_close / recent20_closes[0]) - 1.0
+
+    high20 = _max(recent20_closes)
+    drop_from_high_20 = None
+    if high20 and high20 > 0:
+        drop_from_high_20 = (high20 - last_close) / high20  # 0~1
+
+    slope20 = _lin_slope(recent20_closes)  # 원 단위/일
+    slope20_pct_per_day = None
+    if slope20 is not None and last_close > 0:
+        slope20_pct_per_day = (slope20 / last_close) * 100.0
+
+    downtrend_20 = False
+    if (ret_20 is not None) and (slope20 is not None):
+        downtrend_20 = (ret_20 < 0) and (slope20 < 0)
+
     # --- context features: 하락(일봉) / 아래 횡보 / 수렴 / (선택) 돌파 ---
     n_available = len(bars_desc)
 
@@ -285,42 +323,37 @@ def _score_symbol(bars_desc: list[Bar]) -> tuple[float, dict[str, Any]] | None:
         return None
 
     # 점수(휴리스틱, 우선순위):
-    # 1) 일봉 하락 전환(60MA 꺾임 + 60<120) 가점을 가장 크게
-    # 2) 거래량비(수급) / 박스권(변동성 패널티) / 아래횡보/수렴/돌파는 보조
+    # 1) "좌상단→우하향"(최근 20일 하락) 시각 패턴을 가장 크게 반영
+    # 2) 그 다음으로 60/120 기반 하락 전환 컨텍스트(보조)
+    # 3) 거래량비(수급) / 박스권(변동성 패널티) / 아래횡보/수렴/돌파는 보조
     ma_gap_pct = (last_close / ma20 - 1.0) * 100.0
 
     score = 0.0
 
-    # (A) 하락 컨텍스트 가점 (가장 큼)
+    # (A) "좌상단→우하향"(최근 20일 하락) 최우선 가점
+    # - 하락 추세 자체가 명확하면 큰 가점
+    if downtrend_20:
+        score += 35.0
+
+    # - 최근 20일 고점에서 얼마나 내려왔는지(좌상단에서 내려온 느낌) 추가 가점
+    if drop_from_high_20 is not None:
+        # 10% 하락이면 +10, 30%면 +20 수준으로 제한
+        score += min(drop_from_high_20 * 100.0, 22.0)
+
+    # - 20일 기울기가 더 가팔라질수록 추가 가점(퍼센트/일 기준)
+    if slope20_pct_per_day is not None and slope20_pct_per_day < 0:
+        score += min((-slope20_pct_per_day) * 6.0, 18.0)
+
+    # (B) 60/120 기반 하락 전환 컨텍스트(보조)
     if slope_down:
-        score += 18.0
+        score += 10.0
     if ma_stack_bearish:
-        score += 12.0
-    if downtrend_context_ok:
-        score += 10.0  # 둘 다 만족 추가 보너스
-
-    # (B) 수급(거래량 스파이크) 가점
-    score += (vol_ratio * 6.0)
-
-    # (C) 박스권/난폭 패널티
-    score -= (range_30 * 40.0)
-
-    # (D) 단기 이평 대비 갭(너무 중요 X, 보조)
-    score += (ma_gap_pct * 0.6)
-
-    # (E) 장기이평 아래 횡보/수렴/돌파는 보조 가점
-    if below_ratio is not None:
-        score += (below_ratio * 8.0)
-    if compression_ok:
-        score += 6.0
-    if breakout_ok:
         score += 8.0
+    if downtrend_context_ok:
+        score += 6.0
 
-    # (F) 이미 너무 올라탄(장기이평 재탈환) 경우 감점
-    if reclaimed_above_ma60:
-        score -= 12.0
-    if reclaimed_above_ma120:
-        score -= 10.0
+    # (C) 수급(거래량 스파이크) 가점
+    score += (vol_ratio * 6.0)
 
     meta = {
         "last_close": int(last_close),
@@ -339,6 +372,10 @@ def _score_symbol(bars_desc: list[Bar]) -> tuple[float, dict[str, Any]] | None:
         "ma200_gap_pct": float(ma200_gap * 100.0) if ma200_gap is not None else None,
         "high_lookback": float(high_lookback) if high_lookback is not None else None,
         "near_high": bool(near_high),
+        "ret_20": float(ret_20) if ret_20 is not None else None,
+        "drop_from_high_20": float(drop_from_high_20) if drop_from_high_20 is not None else None,
+        "slope20": float(slope20) if slope20 is not None else None,
+        "slope20_pct_per_day": float(slope20_pct_per_day) if slope20_pct_per_day is not None else None,
         "filters": {
             "liquid_ok": liquid_ok,
             "sideways_ok": sideways_ok,
@@ -352,6 +389,7 @@ def _score_symbol(bars_desc: list[Bar]) -> tuple[float, dict[str, Any]] | None:
             "compression_ok": compression_ok,
             "reclaimed_above_ma60": bool(reclaimed_above_ma60) if reclaimed_above_ma60 is not None else None,
             "reclaimed_above_ma120": bool(reclaimed_above_ma120) if reclaimed_above_ma120 is not None else None,
+            "downtrend_20": bool(downtrend_20),
         },
     }
     return score, meta
